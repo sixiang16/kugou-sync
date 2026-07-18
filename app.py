@@ -251,3 +251,95 @@ def api_import():
     data = request.get_json()
     cookie = data.get('cookie', '').strip()
     if not cookie:
+        return jsonify({'error': 'Cookie 不能为空'}), 400
+
+    sess = requests.Session()
+    sess.verify = False
+    sess.headers.update({'User-Agent': 'Mozilla/5.0'})
+    for item in cookie.split(';'):
+        item = item.strip()
+        if '=' in item:
+            k, v = item.split('=', 1)
+            sess.cookies.set(k.strip(), v.strip())
+
+    userid = sess.cookies.get('KugooID', '').strip()
+    if not userid:
+        match = re.search(r'KugooID=(\d+)', cookie)
+        if match: userid = match.group(1)
+    if not userid:
+        return jsonify({'error': 'Cookie 中未找到用户 ID'}), 400
+
+    try:
+        url = 'https://mobilecdn.kugou.com/api/v3/playlist/getsonglist'
+        params = {'format': 'json', 'userid': userid, 'page': 1, 'pagesize': 500}
+        r = sess.get(url, params=params, timeout=15,
+                     headers={'Referer': 'https://m.kugou.com'})
+        data = r.json()
+        if data.get('status') == 1 and data['data'].get('info'):
+            imported = []
+            for pl in data['data']['info']:
+                pid = pl.get('playlistid')
+                name = pl.get('title', '未知歌单')
+                if pid:
+                    imported.append({'id': pid, 'name': name})
+            existing = load_playlists()
+            existing_ids = {p['id'] for p in existing}
+            new_count = 0
+            for item in imported:
+                if item['id'] not in existing_ids:
+                    existing.append(item)
+                    new_count += 1
+            save_playlists(existing)
+            log_info(f'✅ 导入成功，新增 {new_count} 个歌单')
+            return jsonify({'message': f'导入成功，新增 {new_count} 个歌单', 'playlists': existing})
+        else:
+            log_error(f'导入失败: {data}')
+            return jsonify({'error': '接口返回异常，请检查 Cookie'}), 500
+    except Exception as e:
+        log_error(f'导入异常: {e}')
+        return jsonify({'error': str(e)}), 500
+
+# 日志
+@app.route('/api/logs', methods=['GET'])
+def api_logs():
+    try:
+        with open(LOG_FILE, 'r', encoding='utf-8') as f:
+            lines = f.readlines()
+            return jsonify([line.rstrip('\n') for line in lines[-200:]])
+    except:
+        return jsonify([])
+
+# 同步触发
+@app.route('/api/sync', methods=['POST'])
+def api_sync():
+    data = request.get_json()
+    if data.get('all'):
+        t = threading.Thread(target=sync_all, daemon=True)
+        t.start()
+        return jsonify({'message': '全量同步已启动'})
+    ids = data.get('ids')
+    if not isinstance(ids, list) or len(ids) == 0:
+        return jsonify({'error': 'ids 必须是非空数组'}), 400
+    playlists = load_playlists()
+    id_name = {p['id']: p['name'] for p in playlists}
+    for pid in ids:
+        name = id_name.get(pid, pid)
+        t = threading.Thread(target=sync_playlist, args=(pid, name), daemon=True)
+        t.start()
+    return jsonify({'message': f'已开始同步 {len(ids)} 个歌单'})
+
+# ============================================================
+# 启动
+# ============================================================
+if __name__ == '__main__':
+    try:
+        log_info('🚀 酷狗同步服务启动')
+        threading.Thread(target=run_scheduler, daemon=True).start()
+        log_info(f'🌐 面板监听 http://0.0.0.0:{WEB_PORT}')
+        app.run(host='0.0.0.0', port=WEB_PORT, debug=False, use_reloader=False)
+    except Exception as e:
+        log_error(f'💥 启动失败: {traceback.format_exc()}')
+        with open(ERROR_LOG_FILE, 'a') as f:
+            traceback.print_exc(file=f)
+        while True:
+            time.sleep(60)
