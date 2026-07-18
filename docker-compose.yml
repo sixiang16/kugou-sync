@@ -1,0 +1,17 @@
+version: '3.8'
+services:
+  kugou-sync:
+    image: kugou-sync:latest          # 本地构建
+    build: .                          # 如果不想构建，可换成你的镜像地址
+    container_name: kugou-sync
+    restart: always
+    environment:
+      # ---------- 必改项 ----------
+      - PLAYLIST_IDS=123456,789012    # 你的歌单ID（逗号分隔）
+      - KUGOU_COOKIE=kg_mid=xxx; kg_dfid=yyy; ...   # 登录后的Cookie完整字符串
+      # ---------- 可选配置 ----------
+      - INTERVAL_MIN=60               # 同步间隔（分钟）
+      - PLAYLIST_NAMES=华语经典,私人珍藏  # 歌单显示名称（逗号对应ID顺序），不填则自动从网络获取
+      - DOWNLOAD_DIR=/music           # 容器内下载路径（勿改）
+    volumes:
+      - /volume1/music:/music         # 左边是你NAS上的音乐存放路径，请按实修改
