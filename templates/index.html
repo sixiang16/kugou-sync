@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>酷狗歌单同步面板</title>
+    <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
+    <style>
+        body { padding: 20px; background: #f0f2f5; }
+        .log-area { height: 500px; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; font-family: 'Courier New', monospace; }
+        .log-line { font-size: 13px; line-height: 1.6; padding: 2px 4px; border-radius: 3px; }
+        .log-line:hover { background: #2a2d34; }
+        .card { box-shadow: 0 2px 8px rgba(0,0,0,0.1); border: none; }
+        .playlist-list { max-height: 400px; overflow-y: auto; }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <h3 class="mb-4">🎵 酷狗歌单同步控制台</h3>
+        <div class="row">
+            <!-- 左侧：歌单列表 -->
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <strong>我的歌单</strong>
+                        <button class="btn btn-sm btn-outline-secondary" onclick="refreshPlaylists()">刷新</button>
+                    </div>
+                    <div class="card-body p-2 playlist-list" id="playlist-list">
+                        <div class="text-center text-muted py-4">加载中...</div>
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-success w-100" onclick="syncSelected()">同步选中歌单</button>
+                        <button class="btn btn-primary w-100 mt-2" onclick="syncAll()">全量同步所有歌单</button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- 右侧：日志窗口 -->
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between">
+                        <strong>实时同步日志</strong>
+                        <span class="text-muted small" id="log-status">自动刷新中...</span>
+                    </div>
+                    <div class="card-body p-0">
+                        <div class="log-area" id="log-area">
+                            <div class="log-line">⏳ 等待操作...</div>
+                        </div>
+                    </div>
+                    <div class="card-footer">
+                        <button class="btn btn-sm btn-outline-secondary" onclick="clearLogs()">清空显示</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let lastLogId = -1;
+
+        document.addEventListener('DOMContentLoaded', () => {
+            refreshPlaylists();
+            setInterval(fetchNewLogs, 1500);
+        });
+
+        async function refreshPlaylists() {
+            const listEl = document.getElementById('playlist-list');
+            listEl.innerHTML = '<div class="text-center text-muted py-4">加载中...</div>';
+            try {
+                const r = await fetch('/api/playlists');
+                const data = await r.json();
+                if (!Array.isArray(data)) throw new Error('数据格式错误');
+                if (data.length === 0) {
+                    listEl.innerHTML = '<div class="text-center text-muted py-4">没有歌单，请检查 Cookie 是否有效</div>';
+                    return;
+                }
+                listEl.innerHTML = data.map(pl => `
+                    <div class="form-check my-1">
+                        <input class="form-check-input" type="checkbox" value="${pl.id}" id="pl-${pl.id}">
+                        <label class="form-check-label" for="pl-${pl.id}">${escapeHtml(pl.name)}</label>
+                    </div>
+                `).join('');
+            } catch (e) {
+                listEl.innerHTML = '<div class="text-danger py-2">加载失败，检查网络或 Cookie</div>';
+                console.error(e);
+            }
+        }
+
+        function getSelectedIds() {
+            return Array.from(document.querySelectorAll('#playlist-list input:checked')).map(cb => cb.value);
+        }
+
+        async function syncSelected() {
+            const ids = getSelectedIds();
+            if (ids.length === 0) {
+                alert('请至少勾选一个歌单');
+                return;
+            }
+            await triggerSync({ ids });
+        }
+
+        async function syncAll() {
+            if (!confirm('确认全量同步所有歌单吗？')) return;
+            await triggerSync({ all: true });
+        }
+
+        async function triggerSync(payload) {
+            try {
+                const r = await fetch('/api/sync', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(payload)
+                });
+                const res = await r.json();
+                if (r.ok) {
+                    appendLog(`📢 ${res.message}`);
+                } else {
+                    appendLog(`❌ 请求失败: ${res.error || '未知错误'}`);
+                }
+            } catch (e) {
+                appendLog(`❌ 网络错误: ${e.message}`);
+            }
+        }
+
+        async function fetchNewLogs() {
+            try {
+                const r = await fetch('/api/logs');
+                const logs = await r.json();
+                if (!Array.isArray(logs)) return;
+
+                const maxId = logs.length > 0 ? Math.max(...logs.map(l => l.id)) : lastLogId;
+                const newLogs = logs.filter(l => l.id > lastLogId);
+                if (newLogs.length > 0) {
+                    newLogs.forEach(l => appendLog(`[${l.time}] ${l.message}`));
+                    lastLogId = newLogs[newLogs.length - 1].id;
+                    updateLogStatus(newLogs.length);
+                }
+                if (maxId > lastLogId) lastLogId = maxId;  // 防止服务端日志被截断导致 id 跳跃
+            } catch (e) { /* 忽略轮询错误 */ }
+        }
+
+        function appendLog(text) {
+            const area = document.getElementById('log-area');
+            const div = document.createElement('div');
+            div.className = 'log-line';
+            div.textContent = text;
+            area.appendChild(div);
+            area.scrollTop = area.scrollHeight;
+        }
+
+        function updateLogStatus(newLineCount) {
+            const statusEl = document.getElementById('log-status');
+            statusEl.textContent = `新增 ${newLineCount} 条 · 自动刷新中`;
+            setTimeout(() => { statusEl.textContent = '自动刷新中...'; }, 2000);
+        }
+
+        function clearLogs() {
+            document.getElementById('log-area').innerHTML = '';
+            lastLogId = -1;
+            fetchNewLogs();
+        }
+
+        function escapeHtml(text) {
+            const map = {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'};
+            return String(text).replace(/[&<>"']/g, m => map[m]);
+        }
+    </script>
+</body>
+</html>
