@@ -8,6 +8,6 @@ ENV DOWNLOAD_DIR=/music \
     KUGOU_COOKIE="" \
     INTERVAL_MIN=60 \
     WEB_PORT=5000
-VOLUME [ "/music" ]
+VOLUME [ "/music", "/app/data" ]
 EXPOSE 5000
 CMD [ "python", "app.py" ]
