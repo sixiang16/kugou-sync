@@ -15,19 +15,31 @@
     <h3 class="mb-4">🎵 酷狗歌单同步</h3>
     <div class="row">
         <div class="col-md-4">
+            <!-- 导入区域 -->
             <div class="card mb-3">
-                <div class="card-header"><strong>添加歌单</strong></div>
+                <div class="card-header"><strong>📥 一键导入全部歌单</strong></div>
                 <div class="card-body">
                     <div class="input-group">
-                        <input type="text" class="form-control" id="input-link" placeholder="粘贴歌单分享链接或ID">
-                        <button class="btn btn-success" onclick="addFromInput()">添加</button>
+                        <input type="text" class="form-control" id="cookie-input" placeholder="粘贴浏览器Cookie（仅导入用）">
+                        <button class="btn btn-success" onclick="importPlaylists()">导入</button>
                     </div>
-                    <small class="text-muted">支持 gcid、数字ID、分享链接</small>
+                    <small class="text-muted">导入后无需再填Cookie，歌单永久保存</small>
                 </div>
             </div>
+            <!-- 手动添加 -->
+            <div class="card mb-3">
+                <div class="card-header"><strong>➕ 手动添加歌单</strong></div>
+                <div class="card-body">
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="input-link" placeholder="粘贴分享链接或ID">
+                        <button class="btn btn-outline-success" onclick="addFromInput()">添加</button>
+                    </div>
+                </div>
+            </div>
+            <!-- 歌单列表 -->
             <div class="card">
                 <div class="card-header d-flex justify-content-between"><strong>我的歌单</strong><button class="btn btn-sm btn-outline-secondary" onclick="loadPlaylists()">刷新</button></div>
-                <div class="card-body p-2" style="max-height: 400px; overflow-y: auto;" id="playlist-list">
+                <div class="card-body p-2" style="max-height: 300px; overflow-y: auto;" id="playlist-list">
                     <div class="text-muted text-center py-4">暂无歌单</div>
                 </div>
                 <div class="card-footer">
@@ -67,6 +79,23 @@
     }
 
     function escapeHtml(text) { return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m]); }
+
+    async function importPlaylists() {
+        const cookie = document.getElementById('cookie-input').value.trim();
+        if (!cookie) return alert('请先粘贴 Cookie');
+        const res = await fetch('/api/import', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({cookie})
+        });
+        const data = await res.json();
+        if (res.ok) {
+            alert(data.message);
+            loadPlaylists();
+        } else {
+            alert('导入失败: ' + (data.error || '未知错误'));
+        }
+    }
 
     async function addFromInput() {
         const input = document.getElementById('input-link').value.trim();
