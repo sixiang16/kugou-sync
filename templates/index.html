@@ -2,12 +2,13 @@
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <title>酷狗歌单同步</title>
+    <title>酷狗歌单同步 - 扫码版</title>
     <link href="https://cdn.bootcdn.net/ajax/libs/twitter-bootstrap/5.3.0/css/bootstrap.min.css" rel="stylesheet">
     <style>
         body { padding: 20px; background: #f0f2f5; }
         .log-area { height: 500px; overflow-y: auto; background: #1e1e1e; color: #d4d4d4; padding: 12px; border-radius: 6px; font-family: monospace; }
         .card { box-shadow: 0 2px 8px rgba(0,0,0,0.1); border: none; }
+        #qr-area img { max-width: 250px; }
     </style>
 </head>
 <body>
@@ -15,25 +16,23 @@
     <h3 class="mb-4">🎵 酷狗歌单同步</h3>
     <div class="row">
         <div class="col-md-4">
-            <!-- 导入区域 -->
+            <!-- 扫码登录区域 -->
             <div class="card mb-3">
-                <div class="card-header"><strong>📥 一键导入全部歌单</strong></div>
-                <div class="card-body">
-                    <div class="input-group">
-                        <input type="text" class="form-control" id="cookie-input" placeholder="粘贴浏览器Cookie（仅导入用）">
-                        <button class="btn btn-success" onclick="importPlaylists()">导入</button>
+                <div class="card-header"><strong>📱 扫码登录酷狗</strong></div>
+                <div class="card-body text-center" id="qr-area">
+                    <button class="btn btn-primary" id="btn-get-qr" onclick="getQRCode()">获取二维码</button>
+                    <div id="qr-image" style="display:none; margin-top:10px;">
+                        <img src="" id="qr-img" alt="二维码"><br>
+                        <small class="text-muted">请用酷狗App扫描二维码授权</small>
                     </div>
-                    <small class="text-muted">导入后无需再填Cookie，歌单永久保存</small>
                 </div>
             </div>
-            <!-- 手动添加 -->
+            <!-- 导入歌单按钮 -->
             <div class="card mb-3">
-                <div class="card-header"><strong>➕ 手动添加歌单</strong></div>
+                <div class="card-header"><strong>📥 导入全部歌单</strong></div>
                 <div class="card-body">
-                    <div class="input-group">
-                        <input type="text" class="form-control" id="input-link" placeholder="粘贴分享链接或ID">
-                        <button class="btn btn-outline-success" onclick="addFromInput()">添加</button>
-                    </div>
+                    <button class="btn btn-success w-100" onclick="importPlaylists()" id="btn-import" disabled>一键导入我的歌单</button>
+                    <small class="text-muted">需先扫码登录</small>
                 </div>
             </div>
             <!-- 歌单列表 -->
@@ -50,120 +49,91 @@
         </div>
         <div class="col-md-8">
             <div class="card">
-                <div class="card-header d-flex justify-content-between">
-                    <strong>实时日志</strong>
-                    <button class="btn btn-sm btn-outline-secondary" onclick="clearLogs()">清空</button>
-                </div>
-                <div class="card-body p-0">
-                    <div class="log-area" id="log-area"><div>⏳ 等待操作...</div></div>
-                </div>
+                <div class="card-header d-flex justify-content-between"><strong>实时日志</strong><button class="btn btn-sm btn-outline-secondary" onclick="clearLogs()">清空</button></div>
+                <div class="card-body p-0"><div class="log-area" id="log-area"><div>⏳ 等待操作...</div></div></div>
             </div>
         </div>
     </div>
 </div>
 
 <script>
-    async function loadPlaylists() {
-        const res = await fetch('/api/playlists');
-        const data = await res.json();
-        const listEl = document.getElementById('playlist-list');
-        if (data.length === 0) {
-            listEl.innerHTML = '<div class="text-muted text-center py-4">暂无歌单</div>';
-            return;
+    let qrKey = '';
+    let loginSuccess = false;
+    let pollingTimer = null;
+
+    async function getQRCode() {
+        const resp = await fetch('/api/qrcode');
+        if (!resp.ok) { alert('获取二维码失败'); return; }
+        const data = await resp.json();
+        qrKey = data.key;
+        document.getElementById('qr-img').src = 'data:image/png;base64,' + data.qr_image;
+        document.getElementById('qr-image').style.display = 'block';
+        document.getElementById('btn-get-qr').style.display = 'none';
+        // 开始轮询登录状态
+        pollingTimer = setInterval(checkLogin, 2000);
+    }
+
+    async function checkLogin() {
+        if (!qrKey) return;
+        const resp = await fetch('/api/qrcode/check', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({key: qrKey})
+        });
+        const data = await resp.json();
+        if (data.status === 'success') {
+            clearInterval(pollingTimer);
+            loginSuccess = true;
+            document.getElementById('qr-image').innerHTML = '<div class="alert alert-success">✅ 扫码成功！</div>';
+            document.getElementById('btn-import').disabled = false;
+        } else if (data.status === 'failed') {
+            clearInterval(pollingTimer);
+            document.getElementById('qr-image').innerHTML = '<div class="alert alert-danger">❌ 扫码失败，请重新获取</div>';
+            document.getElementById('btn-get-qr').style.display = 'inline-block';
         }
+    }
+
+    async function importPlaylists() {
+        const resp = await fetch('/api/import', {method: 'POST'});
+        if (resp.ok) {
+            alert('导入成功');
+            loadPlaylists();
+        } else {
+            const err = await resp.json();
+            alert('导入失败: ' + err.error);
+        }
+    }
+
+    async function loadPlaylists() {
+        const res = await fetch('/api/playlists'); const data = await res.json();
+        const listEl = document.getElementById('playlist-list');
+        if (data.length === 0) { listEl.innerHTML = '<div class="text-muted text-center py-4">暂无歌单</div>'; return; }
         listEl.innerHTML = data.map(p => `
             <div class="d-flex justify-content-between align-items-center border-bottom py-1">
-                <label class="ms-2"><input type="checkbox" value="${p.id}" class="me-2">${escapeHtml(p.name)} <small class="text-muted">(${p.id})</small></label>
+                <label class="ms-2"><input type="checkbox" value="${p.id}" class="me-2">${escapeHtml(p.name)}</label>
                 <button class="btn btn-sm btn-danger" onclick="deletePlaylist('${p.id}')">删除</button>
             </div>`).join('');
     }
-
     function escapeHtml(text) { return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m]); }
-
-    async function importPlaylists() {
-        const cookie = document.getElementById('cookie-input').value.trim();
-        if (!cookie) return alert('请先粘贴 Cookie');
-        const res = await fetch('/api/import', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({cookie})
-        });
-        const data = await res.json();
-        if (res.ok) {
-            alert(data.message);
-            loadPlaylists();
-        } else {
-            alert('导入失败: ' + (data.error || '未知错误'));
-        }
-    }
-
-    async function addFromInput() {
-        const input = document.getElementById('input-link').value.trim();
-        if (!input) return alert('请输入内容');
-        const res = await fetch('/api/playlists', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({input})
-        });
-        if (res.ok) {
-            document.getElementById('input-link').value = '';
-            loadPlaylists();
-        } else {
-            const err = await res.json();
-            alert(err.error);
-        }
-    }
-
-    async function deletePlaylist(id) {
-        if (!confirm('确认删除？')) return;
-        await fetch(`/api/playlists/${id}`, {method: 'DELETE'});
-        loadPlaylists();
-    }
-
-    function getSelectedIds() {
-        return Array.from(document.querySelectorAll('#playlist-list input:checked')).map(cb => cb.value);
-    }
-
+    async function deletePlaylist(id) { if (!confirm('确认删除？')) return; await fetch(`/api/playlists/${id}`, {method: 'DELETE'}); loadPlaylists(); }
+    function getSelectedIds() { return Array.from(document.querySelectorAll('#playlist-list input:checked')).map(cb => cb.value); }
     async function syncSelected() {
-        const ids = getSelectedIds();
-        if (ids.length === 0) return alert('请勾选歌单');
-        await fetch('/api/sync', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({ids})
-        });
+        const ids = getSelectedIds(); if (ids.length === 0) return alert('请勾选歌单');
+        await fetch('/api/sync', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ids}) });
     }
-
-    async function syncAll() {
-        await fetch('/api/sync', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({all: true})
-        });
-    }
-
+    async function syncAll() { await fetch('/api/sync', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({all: true}) }); }
     let lastLogLength = 0;
     setInterval(async () => {
-        const res = await fetch('/api/logs');
-        const lines = await res.json();
+        const res = await fetch('/api/logs'); const lines = await res.json();
         if (lines.length > lastLogLength) {
             const newLines = lines.slice(lastLogLength);
             const area = document.getElementById('log-area');
-            newLines.forEach(line => {
-                const div = document.createElement('div');
-                div.textContent = line;
-                area.appendChild(div);
-            });
+            newLines.forEach(line => { const div = document.createElement('div'); div.textContent = line; area.appendChild(div); });
             area.scrollTop = area.scrollHeight;
             lastLogLength = lines.length;
         }
     }, 1500);
-
-    function clearLogs() {
-        document.getElementById('log-area').innerHTML = '';
-        lastLogLength = 0;
-    }
-
+    function clearLogs() { document.getElementById('log-area').innerHTML = ''; lastLogLength = 0; }
     loadPlaylists();
 </script>
 </body>
