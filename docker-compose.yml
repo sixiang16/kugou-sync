@@ -1,14 +1,15 @@
 services:
   kugou-sync:
-    image: sixiang16123/kugou-sync:latest
+    image: sixiang16123/kugou-sync:latest   # 替换为你的 Docker Hub 镜像名
     container_name: kugou-sync
     restart: always
     ports:
-      - "5000:5000"
+      - "5000:5000"             # 左边可改为其他端口，右边 5000 不能动
     environment:
-      - KUGOU_COOKIE=你的完整cookie字符串（用于获取下载链接时参考kg_mid，可选）
-      - INTERVAL_MIN=60
-      - WEB_PORT=5000
+      - INTERVAL_MIN=60         # 定时同步间隔（分钟）
+      - WEB_PORT=5000           # 与 ports 右边端口保持一致
+      - DOWNLOAD_DIR=/music     # 容器内下载路径，一般无需修改
+      # 注意：不再需要 KUGOU_COOKIE 或任何其他 Cookie 变量
     volumes:
-      - /volume1/music:/music          # 下载路径
-      - /vol1/1000/docker/kugou-sync/data:/app/data   # 保存歌单配置
+      - /volume1/music:/music                    # 将 NAS 上的音乐文件夹映射进去，请按实际路径修改
+      - /vol1/1000/docker/kugou-sync/data:/app/data  # 保存歌单配置的文件夹
