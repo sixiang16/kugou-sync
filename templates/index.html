@@ -12,18 +12,17 @@
 </head>
 <body>
 <div class="container-fluid">
-    <h3 class="mb-4">🎵 酷狗歌单同步控制台</h3>
+    <h3 class="mb-4">🎵 酷狗歌单同步</h3>
     <div class="row">
-        <!-- 左侧：管理区 -->
         <div class="col-md-4">
             <div class="card mb-3">
-                <div class="card-header"><strong>导入歌单</strong></div>
+                <div class="card-header"><strong>添加歌单</strong></div>
                 <div class="card-body">
                     <div class="input-group">
-                        <input type="text" class="form-control" id="cookie-input" placeholder="粘贴 Cookie（仅导入用）">
-                        <button class="btn btn-info" onclick="importPlaylists()">导入</button>
+                        <input type="text" class="form-control" id="input-link" placeholder="粘贴歌单分享链接或ID">
+                        <button class="btn btn-success" onclick="addFromInput()">添加</button>
                     </div>
-                    <small class="text-muted">只需导入一次，之后无需 Cookie</small>
+                    <small class="text-muted">支持 gcid、数字ID、分享链接</small>
                 </div>
             </div>
             <div class="card">
@@ -32,18 +31,11 @@
                     <div class="text-muted text-center py-4">暂无歌单</div>
                 </div>
                 <div class="card-footer">
-                    <div class="input-group mb-2">
-                        <input type="text" class="form-control" id="new-id" placeholder="歌单 ID">
-                        <input type="text" class="form-control" id="new-name" placeholder="名称（可选）">
-                        <button class="btn btn-success" onclick="addPlaylist()">添加</button>
-                    </div>
                     <button class="btn btn-primary w-100" onclick="syncAll()">全量同步</button>
                     <button class="btn btn-outline-secondary w-100 mt-1" onclick="syncSelected()">同步选中</button>
                 </div>
             </div>
         </div>
-
-        <!-- 右侧：日志 -->
         <div class="col-md-8">
             <div class="card">
                 <div class="card-header d-flex justify-content-between">
@@ -51,9 +43,7 @@
                     <button class="btn btn-sm btn-outline-secondary" onclick="clearLogs()">清空</button>
                 </div>
                 <div class="card-body p-0">
-                    <div class="log-area" id="log-area">
-                        <div>⏳ 等待操作...</div>
-                    </div>
+                    <div class="log-area" id="log-area"><div>⏳ 等待操作...</div></div>
                 </div>
             </div>
         </div>
@@ -61,7 +51,6 @@
 </div>
 
 <script>
-    // ========== 歌单列表 ==========
     async function loadPlaylists() {
         const res = await fetch('/api/playlists');
         const data = await res.json();
@@ -77,22 +66,18 @@
             </div>`).join('');
     }
 
-    function escapeHtml(text) {
-        return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m]);
-    }
+    function escapeHtml(text) { return String(text).replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[m]); }
 
-    async function addPlaylist() {
-        const id = document.getElementById('new-id').value.trim();
-        const name = document.getElementById('new-name').value.trim();
-        if (!id) return alert('歌单ID不能为空');
+    async function addFromInput() {
+        const input = document.getElementById('input-link').value.trim();
+        if (!input) return alert('请输入内容');
         const res = await fetch('/api/playlists', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({id, name})
+            body: JSON.stringify({input})
         });
         if (res.ok) {
-            document.getElementById('new-id').value = '';
-            document.getElementById('new-name').value = '';
+            document.getElementById('input-link').value = '';
             loadPlaylists();
         } else {
             const err = await res.json();
@@ -106,29 +91,6 @@
         loadPlaylists();
     }
 
-    // ========== 导入 ==========
-    async function importPlaylists() {
-        const cookie = document.getElementById('cookie-input').value.trim();
-        if (!cookie) return alert('请粘贴 Cookie');
-        try {
-            const res = await fetch('/api/import', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({cookie})
-            });
-            const data = await res.json();
-            if (res.ok) {
-                alert(data.message);
-                loadPlaylists();
-            } else {
-                alert('导入失败: ' + data.error);
-            }
-        } catch (e) {
-            alert('网络错误');
-        }
-    }
-
-    // ========== 同步 ==========
     function getSelectedIds() {
         return Array.from(document.querySelectorAll('#playlist-list input:checked')).map(cb => cb.value);
     }
@@ -151,7 +113,6 @@
         });
     }
 
-    // ========== 日志 ==========
     let lastLogLength = 0;
     setInterval(async () => {
         const res = await fetch('/api/logs');
@@ -174,7 +135,6 @@
         lastLogLength = 0;
     }
 
-    // 初始化
     loadPlaylists();
 </script>
 </body>
