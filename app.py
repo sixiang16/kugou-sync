@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-酷狗歌单同步服务 + Web 控制面板
-- 使用 musicapi 核心接口获取歌单歌曲，不依赖不稳定 API
-- 手动添加/管理要同步的歌单 (通过 specialid)
-- 支持定时全量同步、手动触发、实时日志
+酷狗歌单同步服务 + Web 控制面板（终极稳定版）
+- 歌单歌曲获取：使用 musicapi 的 gatewayretry 接口（无需 Cookie）
+- 下载链接获取：使用 musicapi 的 gateway.kugou.com 接口（无需 Cookie）
+- 手动管理歌单，自动定时同步
 """
 import os, re, json, time, threading, sys, logging, traceback, hashlib
 from pathlib import Path
@@ -35,7 +35,7 @@ def log_info(msg): logger.info(msg)
 def log_error(msg): logger.error(msg); error_logger.error(msg)
 
 # ============================================================
-# 配置
+# 配置（不再需要 KUGOU_COOKIE）
 # ============================================================
 DOWNLOAD_DIR = os.getenv('DOWNLOAD_DIR', '/music')
 WEB_PORT    = int(os.getenv('WEB_PORT', '5000'))
@@ -44,9 +44,9 @@ INTERVAL_MIN = int(os.getenv('INTERVAL_MIN', '60'))
 app = Flask(__name__)
 
 # ============================================================
-# 歌单配置文件 (存储到文件，避免每次重置)
+# 歌单配置存储
 # ============================================================
-PLAYLIST_STORE = '/app/data/playlists.json'   # 在容器内保存用户添加的歌单
+PLAYLIST_STORE = '/app/data/playlists.json'
 
 def load_playlists():
     try:
@@ -111,37 +111,53 @@ def get_songs(pid):
         log_error(f'获取歌单歌曲异常 pid={pid}: {e}')
     return []
 
+# ============================================================
+# 下载链接获取（移植自 musicapi 的 get_kugou_url，零 Cookie 稳定版）
+# ============================================================
 def get_play_url(song):
-    """通过 hash 获取高音质链接 (需要 Cookie 中的 kg_mid)"""
-    cookie_str = os.getenv('KUGOU_COOKIE', '')
-    kg_mid = '123456'
-    if 'kg_mid=' in cookie_str:
-        kg_mid = cookie_str.split('kg_mid=')[1].split(';')[0]
+    """
+    使用 gateway.kugou.com 获取高音质播放链接
+    不需要 Cookie，只需 hash + 固定 mid + 签名
+    优先尝试 sqhash > 320hash > hash
+    """
+    # 固定的 mid 和 userid（与 musicapi 一致）
+    mid = '239526275778893399526700786998289824956'
+    userid = '0'
+
+    # 依次尝试高音质到标准音质
     hashes = [song.get('sqhash'), song.get('320hash'), song.get('hash')]
     for h in hashes:
-        if not h: continue
-        params = {
-            'r': 'play/getdata',
-            'hash': h,
-            'album_id': song.get('album_id', 0),
-            'mid': kg_mid
+        if not h:
+            continue
+        # 生成签名
+        raw = h + '57ae12eb6890223e355ccfcb74edf70d1005' + mid + userid
+        str_md5 = hashlib.md5(raw.encode()).hexdigest()
+
+        url = (f'https://gateway.kugou.com/i/v2/'
+               f'?dfid=&pid=2&mid={mid}&cmd=26&token=&hash={h}&area_code=1&behavior=play'
+               f'&appid=1005&module=&vipType=6&ptype=1&userid={userid}&mtype=1'
+               f'&album_id={song.get("album_id", 0)}&pidversion=3001&key={str_md5}'
+               f'&version=10209&album_audio_id=&with_res_tag=1')
+
+        headers = {
+            'Host': 'gateway.kugou.com',
+            'x-router': 'tracker.kugou.com',
+            'User-Agent': 'Android511-AndroidPhone-10209-14-0-NetMusic-wifi'
         }
         try:
-            r = requests.get('https://wwwapi.kugou.com/yy/index.php',
-                             params=params,
-                             headers={'Referer': 'https://www.kugou.com'},
-                             cookies={'kg_mid': kg_mid},
-                             timeout=10, verify=False)
-            data = r.json()
-            if data.get('err_code') == 0 and data.get('data'):
-                url = data['data'].get('play_url') or data['data'].get('url')
-                if url: return url
-        except: continue
+            r = requests.get(url, headers=headers, timeout=10)
+            text = r.text.replace('<!--KG_TAG_RES_START-->', '').replace('<!--KG_TAG_RES_END-->', '')
+            data = json.loads(text)
+            play_list = data.get('url', [])
+            if play_list:
+                return play_list[0]
+        except Exception as e:
+            log_error(f'获取播放链接失败 hash={h}: {e}')
     return None
 
 def download_file(url, filepath):
     try:
-        r = requests.get(url, stream=True, timeout=60, verify=False)
+        r = requests.get(url, stream=True, timeout=60)
         r.raise_for_status()
         with open(filepath, 'wb') as f:
             for chunk in r.iter_content(chunk_size=8192):
@@ -150,14 +166,15 @@ def download_file(url, filepath):
         return True
     except Exception as e:
         log_error(f'❌ 下载失败 {filepath.name}: {e}')
-        if filepath.exists(): filepath.unlink()
+        if filepath.exists():
+            filepath.unlink()
         return False
 
 def safe_name(text):
     return re.sub(r'[\\/*?:"<>|]', '_', str(text))
 
 # ============================================================
-# 同步逻辑 (针对已保存的歌单)
+# 同步逻辑
 # ============================================================
 def sync_playlist(pid, name):
     folder = Path(DOWNLOAD_DIR) / safe_name(name)
@@ -181,7 +198,7 @@ def sync_playlist(pid, name):
 def sync_all():
     playlists = load_playlists()
     if not playlists:
-        log_info('⚠️ 没有待同步的歌单，请通过面板添加')
+        log_info('⚠️ 没有待同步的歌单')
         return
     log_info('⏰ 定时同步开始')
     for pl in playlists:
@@ -197,13 +214,13 @@ def sync_all():
 def run_scheduler():
     if INTERVAL_MIN > 0:
         schedule.every(INTERVAL_MIN).minutes.do(sync_all)
-        log_info(f'📅 定时同步已设置，间隔 {INTERVAL_MIN} 分钟')
+        log_info(f'📅 定时同步间隔 {INTERVAL_MIN} 分钟')
         while True:
             schedule.run_pending()
             time.sleep(30)
 
 # ============================================================
-# Web 路由
+# Web 路由（与之前相同）
 # ============================================================
 @app.route('/')
 def index():
@@ -219,22 +236,21 @@ def api_add_playlist():
     pid = data.get('id', '').strip()
     name = data.get('name', '').strip()
     if not pid:
-        return jsonify({'error': '歌单ID不能为空'}), 400
+        return jsonify({'error': 'ID 不能为空'}), 400
     playlists = load_playlists()
-    # 去重
     if any(p['id'] == pid for p in playlists):
-        return jsonify({'error': '歌单已存在'}), 409
-    playlists.append({'id': pid, 'name': name if name else pid})
+        return jsonify({'error': '已存在'}), 409
+    playlists.append({'id': pid, 'name': name or pid})
     save_playlists(playlists)
-    log_info(f'➕ 添加歌单：{name or pid} ({pid})')
-    return jsonify({'message': '添加成功', 'playlist': {'id': pid, 'name': name or pid}})
+    log_info(f'➕ 添加歌单：{name or pid}')
+    return jsonify({'message': '添加成功'})
 
 @app.route('/api/playlists/<pid>', methods=['DELETE'])
 def api_delete_playlist(pid):
     playlists = load_playlists()
     new_list = [p for p in playlists if p['id'] != pid]
     if len(new_list) == len(playlists):
-        return jsonify({'error': '歌单不存在'}), 404
+        return jsonify({'error': '不存在'}), 404
     save_playlists(new_list)
     log_info(f'🗑️ 删除歌单：{pid}')
     return jsonify({'message': '删除成功'})
@@ -254,7 +270,7 @@ def api_sync():
     if data.get('all'):
         t = threading.Thread(target=sync_all, daemon=True)
         t.start()
-        return jsonify({'message': '全量同步已启动'})
+        return jsonify({'message': '全量同步开始'})
     ids = data.get('ids')
     if not isinstance(ids, list) or len(ids) == 0:
         return jsonify({'error': 'ids 必须是非空数组'}), 400
@@ -271,13 +287,12 @@ def api_sync():
 # ============================================================
 if __name__ == '__main__':
     try:
-        log_info('🚀 酷狗歌单同步服务启动（手动歌单模式）')
+        log_info('🚀 酷狗同步服务启动（无需 Cookie）')
         threading.Thread(target=run_scheduler, daemon=True).start()
         log_info(f'🌐 面板监听 http://0.0.0.0:{WEB_PORT}')
         app.run(host='0.0.0.0', port=WEB_PORT, debug=False, use_reloader=False)
     except Exception as e:
         log_error(f'💥 启动失败: {traceback.format_exc()}')
         with open(ERROR_LOG_FILE, 'a') as f:
-            f.write(f'=== 启动失败 {time.strftime("%Y-%m-%d %H:%M:%S")} ===\n')
             traceback.print_exc(file=f)
         while True: time.sleep(60)
