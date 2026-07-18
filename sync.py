@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""酷狗歌单自动同步下载服务 - 适用于飞牛NAS Docker"""
+"""酷狗全歌单自动同步下载服务 - 适用于飞牛 NAS Docker"""
 import os, re, json, time, requests, schedule
 from pathlib import Path
 
@@ -7,8 +7,6 @@ from pathlib import Path
 DOWNLOAD_DIR    = os.getenv('DOWNLOAD_DIR', '/music')
 KUGOU_COOKIE    = os.getenv('KUGOU_COOKIE', '')
 INTERVAL_MIN    = int(os.getenv('INTERVAL_MIN', '60'))
-PLAYLIST_IDS    = os.getenv('PLAYLIST_IDS', '')
-PLAYLIST_NAMES  = os.getenv('PLAYLIST_NAMES', '')
 
 session = requests.Session()
 session.headers.update({'User-Agent': 'Mozilla/5.0'})
@@ -19,28 +17,11 @@ if KUGOU_COOKIE:
             session.cookies.set(k, v)
 
 def safe_name(text):
+    """清理文件名中的非法字符"""
     return re.sub(r'[\\/*?:"<>|]', '_', text)
 
-def get_playlist_name(pid):
-    """获取歌单名字（失败时回退为ID）"""
-    try:
-        r = session.get(f'https://www.kugou.com/yy/playlist/{pid}.html', timeout=10)
-        r.encoding = 'utf-8'
-        # 尝试从 <title> 提取
-        m = re.search(r'<title>(.*?)</title>', r.text)
-        if m:
-            return m.group(1).replace(' - 酷狗音乐', '').strip()
-        # 尝试从 __INITIAL_STATE__ 提取
-        m = re.search(r'window\.__INITIAL_STATE__\s*=\s*(\{.*?\});', r.text, re.DOTALL)
-        if m:
-            data = json.loads(m.group(1))
-            return data.get('playlist', {}).get('info', {}).get('title', pid)
-    except:
-        pass
-    return str(pid)
-
 def get_songs(pid):
-    """移动端接口获取歌单全部歌曲"""
+    """通过移动端接口获取歌单全部歌曲"""
     url = 'https://mobilecdn.kugou.com/api/v3/playlist/song'
     params = {'format': 'json', 'playlistid': pid, 'page': 1, 'pagesize': 1000}
     try:
@@ -53,24 +34,36 @@ def get_songs(pid):
     return []
 
 def get_play_url(song):
-    """通过 hash 获取高音质播放链接（参考 Kugou-api 项目）"""
+    """通过 hash 获取高音质播放链接"""
     hashes = [song.get('sqhash'), song.get('320hash'), song.get('hash')]
     mid = session.cookies.get('kg_mid', '123456')
     for h in hashes:
-        if not h: continue
-        params = {'r': 'play/getdata', 'hash': h, 'album_id': song.get('album_id', 0), 'mid': mid}
+        if not h:
+            continue
+        params = {
+            'r': 'play/getdata',
+            'hash': h,
+            'album_id': song.get('album_id', 0),
+            'mid': mid
+        }
         try:
-            r = session.get('https://wwwapi.kugou.com/yy/index.php',
-                            params=params, headers={'Referer': 'https://www.kugou.com'}, timeout=10)
+            r = session.get(
+                'https://wwwapi.kugou.com/yy/index.php',
+                params=params,
+                headers={'Referer': 'https://www.kugou.com'},
+                timeout=10
+            )
             data = r.json()
             if data.get('err_code') == 0 and data.get('data'):
                 url = data['data'].get('play_url') or data['data'].get('url')
-                if url: return url
+                if url:
+                    return url
         except:
             continue
     return None
 
 def download(url, path):
+    """下载音乐文件"""
     try:
         r = requests.get(url, stream=True, timeout=60)
         r.raise_for_status()
@@ -81,18 +74,34 @@ def download(url, path):
         return True
     except Exception as e:
         print(f'❌ 下载失败 {path.name}: {e}')
-        if path.exists(): path.unlink()
+        if path.exists():
+            path.unlink()
         return False
 
-def sync():
-    ids = [x.strip() for x in PLAYLIST_IDS.split(',') if x.strip()]
-    if not ids:
-        print('⚠️ 未设置歌单ID，请检查环境变量 PLAYLIST_IDS')
-        return
-    names = [x.strip() for x in PLAYLIST_NAMES.split(',') if x.strip()] if PLAYLIST_NAMES else []
+def get_user_playlists():
+    """自动获取当前账号的所有歌单（包括私有和活动添加的）"""
+    url = 'https://mobilecdn.kugou.com/api/v3/playlist/getsonglist'
+    params = {'format': 'json', 'pagesize': 500, 'page': 1}
+    try:
+        r = session.get(url, params=params, timeout=15,
+                        headers={'Referer': 'https://m.kugou.com'})
+        data = r.json()
+        if data.get('status') == 1:
+            return data['data']['info']
+    except:
+        pass
+    return []
 
-    for i, pid in enumerate(ids):
-        name = names[i] if i < len(names) else get_playlist_name(pid)
+def sync_all():
+    """同步所有歌单"""
+    playlists = get_user_playlists()
+    if not playlists:
+        print('⚠️ 未能获取到任何歌单，请检查 Cookie 是否有效')
+        return
+
+    for pl in playlists:
+        pid = pl['playlistid']
+        name = pl.get('title', str(pid))
         print(f'\n🎵 同步歌单：{name} ({pid})')
         folder = Path(DOWNLOAD_DIR) / safe_name(name)
         folder.mkdir(parents=True, exist_ok=True)
@@ -113,9 +122,9 @@ def sync():
                 print(f'🔇 无法获取链接：{filename}')
 
 if __name__ == '__main__':
-    print('🚀 酷狗歌单同步服务启动')
-    sync()
-    schedule.every(INTERVAL_MIN).minutes.do(sync)
+    print('🚀 酷狗全歌单同步服务启动')
+    sync_all()
+    schedule.every(INTERVAL_MIN).minutes.do(sync_all)
     while True:
         schedule.run_pending()
         time.sleep(30)
