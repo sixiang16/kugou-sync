@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-酷狗歌单同步服务（支持 gcid 链接）
+酷狗歌单同步服务（最终稳定版）
+- 导入：使用 Cookie + 签名接口获取用户所有歌单（返回正数 playlistid）
+- 下载：基于 musicapi 的 gateway 接口（无需 Cookie）
 """
 import os, re, json, time, threading, sys, logging, traceback, hashlib
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 import requests
 from flask import Flask, render_template, request, jsonify
 import schedule
@@ -34,81 +36,135 @@ def save_playlists(plist):
     with open(PLAYLIST_STORE, 'w', encoding='utf-8') as f:
         json.dump(plist, f, ensure_ascii=False, indent=2)
 
-# ---------- 智能解析输入 ----------
+# ---------- 通用签名函数 ----------
+def kg_sign(params_dict):
+    """根据酷狗移动端 API 规则生成签名"""
+    ordered = sorted(params_dict.items())
+    uri = "&".join([f"{k}={v}" for k, v in ordered])
+    raw = 'OIlwieks28dk2k092lksi2UIkp' + uri + 'OIlwieks28dk2k092lksi2UIkp'
+    return hashlib.md5(raw.encode()).hexdigest()
+
+# ---------- 导入用户歌单（核心） ----------
+def import_user_playlists(cookie_str):
+    """使用 Cookie 拉取用户所有歌单，返回 list of {id, name}"""
+    # 解析 Cookie
+    cookies = {}
+    for item in cookie_str.split(';'):
+        item = item.strip()
+        if '=' in item:
+            k, v = item.split('=', 1)
+            cookies[k.strip()] = v.strip()
+    userid = cookies.get('KugooID', cookies.get('uid', ''))
+    token = cookies.get('t', '')
+    mid = cookies.get('kg_mid', cookies.get('mid', '239526275778893399526700786998289824956'))
+    if not userid:
+        log.error('Cookie 中未找到 KugooID，无法导入')
+        return []
+
+    # ------ 方法1：移动端 playlist/list 接口（加签名） ------
+    try:
+        base_url = 'https://mobilecdn.kugou.com/api/v3/playlist/list'
+        params = {
+            'format': 'json',
+            'userid': userid,
+            'page': 1,
+            'pagesize': 500,
+            'plat': '0',
+            'version': '9108',
+            'with_song': '0',
+            'mid': mid
+        }
+        sign = kg_sign(params)
+        url = f"{base_url}?{'&'.join([f'{k}={quote(str(v))}' for k,v in params.items()])}&signature={sign}"
+        headers = {
+            'User-Agent': 'Android9-AndroidPhone-11239-18-0-playlist-wifi',
+            'Referer': 'https://m.kugou.com',
+            'Cookie': cookie_str
+        }
+        r = requests.get(url, headers=headers, timeout=15, verify=False)
+        log.info(f'[导入] 移动端接口 HTTP {r.status_code}')
+        if r.status_code == 200:
+            try:
+                data = r.json()
+            except:
+                log.error(f'[导入] 移动端接口返回非JSON: {r.text[:200]}')
+                data = {}
+            if data.get('status') == 1 and data.get('data'):
+                plist = data['data'].get('info', data['data'].get('list', []))
+                result = [{'id': p['playlistid'], 'name': p.get('title', '歌单')} for p in plist if 'playlistid' in p]
+                log.info(f'[导入] 移动端接口成功，获取到 {len(result)} 个歌单')
+                return result
+            else:
+                log.error(f'[导入] 移动端接口返回错误: {data}')
+        else:
+            log.error(f'[导入] 移动端接口状态码异常')
+    except Exception as e:
+        log.error(f'[导入] 移动端接口异常: {e}')
+
+    # ------ 方法2：PC 网页端接口（需要 token） ------
+    if token:
+        try:
+            url = 'https://m.kugou.com/yy/playlist/getUserPlaylist'
+            params = {
+                'userid': userid,
+                'token': token,
+                'page': 1,
+                'pagesize': 500
+            }
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+                'Cookie': cookie_str,
+                'Referer': 'https://m.kugou.com'
+            }
+            r = requests.get(url, params=params, headers=headers, timeout=15, verify=False)
+            log.info(f'[导入] PC端接口 HTTP {r.status_code}')
+            if r.status_code == 200:
+                try:
+                    data = r.json()
+                except:
+                    log.error(f'[导入] PC端接口返回非JSON: {r.text[:200]}')
+                    data = {}
+                if data.get('status') == 1 and data.get('data'):
+                    plist = data['data'].get('info', data['data'].get('list', []))
+                    result = [{'id': p['playlistid'], 'name': p.get('title', '歌单')} for p in plist if 'playlistid' in p]
+                    log.info(f'[导入] PC端接口成功，获取到 {len(result)} 个歌单')
+                    return result
+                else:
+                    log.error(f'[导入] PC端接口返回错误: {data}')
+            else:
+                log.error(f'[导入] PC端接口状态码异常')
+        except Exception as e:
+            log.error(f'[导入] PC端接口异常: {e}')
+    else:
+        log.error('[导入] Cookie 中未找到 token，跳过PC端接口')
+
+    log.error('[导入] 所有接口均失败，请检查 Cookie 是否有效')
+    return []
+
+# ---------- 解析输入链接/ID（用于手动添加） ----------
 def extract_info(raw):
     raw = raw.strip()
-    # 数字ID
     if re.fullmatch(r'\d+', raw):
         return 'numeric', raw
     if 'kugou.com' in raw:
         parsed = urlparse(raw)
         params = parse_qs(parsed.query)
-        # 优先提取 gcid
         gcid = params.get('gcid', params.get('src_cid', []))
         if gcid:
             val = gcid[0].replace('gcid_', '')
             return 'gcid', val
-        # 提取 playlistid
         match = re.search(r'/playlist/(\d+)\.html', raw)
         if match: return 'numeric', match.group(1)
-    # 直接以 gcid_ 开头
     if raw.startswith('gcid_'):
         return 'gcid', raw[5:]
     return 'numeric', raw
 
-# ---------- 签名函数 ----------
-def sign(url):
-    uri = url.split('?')[1]
-    ordered = sorted(uri.split('&'))
-    uri = 'OIlwieks28dk2k092lksi2UIkp' + "".join(ordered) + 'OIlwieks28dk2k092lksi2UIkp'
-    return hashlib.md5(uri.encode()).hexdigest()
-
-# ---------- 歌曲提取 ----------
+# ---------- 歌曲获取（根据类型） ----------
 def get_songs(pid, id_type):
     if id_type == 'gcid':
         return _get_songs_by_gcid(pid)
     else:
         return _get_songs_by_numeric(pid)
-
-def _get_songs_by_gcid(gcid):
-    """
-    通过酷狗移动端API获取gcid歌单 (无需Cookie)
-    API: https://m.kugou.com/songlist/getSongList?gcid=xxx
-    """
-    url = f'https://m.kugou.com/songlist/getSongList?gcid={gcid}&page=1&pagesize=500'
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
-        'Referer': f'https://m.kugou.com/songlist/gcid_{gcid}/'
-    }
-    try:
-        r = requests.get(url, headers=headers, timeout=15)
-        data = r.json()
-        if data.get('status') == 1 and data.get('data'):
-            song_list = data['data'].get('info', data['data'].get('list', []))
-            songs = []
-            for item in song_list:
-                name = item.get('songname') or item.get('name', '')
-                singer = item.get('singername') or item.get('singer', '')
-                if not singer and ' - ' in name:
-                    singer, name = name.split(' - ', 1)
-                songs.append({
-                    'songname': name.strip(),
-                    'singername': singer.strip(),
-                    'hash': item.get('hash', ''),
-                    'sqhash': item.get('sqhash', ''),
-                    '320hash': item.get('320hash', ''),
-                    'album_id': item.get('album_id', 0)
-                })
-            if songs:
-                log.info(f'✅ gcid {gcid} 获取到 {len(songs)} 首歌曲')
-            else:
-                log.error(f'gcid {gcid} 无歌曲数据: {data}')
-            return songs
-        else:
-            log.error(f'gcid API返回异常: {data}')
-    except Exception as e:
-        log.error(f'gcid API请求失败: {e}')
-    return []
 
 def _get_songs_by_numeric(pid):
     url = f'http://gatewayretry.kugou.com/v2/get_other_list_file?specialid={pid}&need_sort=1&module=CloudMusic&clientver=11239&pagesize=300&specalidpgc={pid}&userid=0&page=1&type=0&area_code=1&appid=1005'
@@ -120,8 +176,12 @@ def _get_songs_by_numeric(pid):
         'dfid': '-',
         'clienttime': str(int(time.time()))
     }
+    signature = kg_sign({'specialid': pid, 'need_sort': '1', 'module': 'CloudMusic', 'clientver': '11239',
+                         'pagesize': '300', 'specalidpgc': pid, 'userid': '0', 'page': '1', 'type': '0',
+                         'area_code': '1', 'appid': '1005'})
+    full_url = url + '&signature=' + signature
     try:
-        r = requests.get(url + '&signature=' + sign(url), headers=headers, timeout=15)
+        r = requests.get(full_url, headers=headers, timeout=15)
         data = r.json()
         if data.get('status') == 1 and data.get('data'):
             songs = []
@@ -142,7 +202,38 @@ def _get_songs_by_numeric(pid):
         log.error(f'数字ID接口失败: {e}')
     return []
 
-# ---------- 下载链接 (gateway，零Cookie) ----------
+def _get_songs_by_gcid(gcid):
+    """备用的 gcid 接口（可能不稳定，推荐使用导入功能转为数字ID）"""
+    url = f'https://m.kugou.com/songlist/getSongList?gcid={gcid}&page=1&pagesize=500'
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36',
+        'Referer': f'https://m.kugou.com/songlist/gcid_{gcid}/'
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=15)
+        data = r.json()
+        if data.get('status') == 1 and data.get('data'):
+            song_list = data['data'].get('info', data['data'].get('list', []))
+            songs = []
+            for item in song_list:
+                name = item.get('songname') or item.get('name', '')
+                singer = item.get('singername') or item.get('singer', '')
+                if not singer and ' - ' in name:
+                    singer, name = name.split(' - ', 1)
+                songs.append({
+                    'songname': name.strip(), 'singername': singer.strip(),
+                    'hash': item.get('hash', ''), 'sqhash': item.get('sqhash', ''),
+                    '320hash': item.get('320hash', ''), 'album_id': item.get('album_id', 0)
+                })
+            log.info(f'✅ gcid {gcid} 获取到 {len(songs)} 首歌曲')
+            return songs
+        else:
+            log.error(f'gcid接口返回异常: {data}')
+    except Exception as e:
+        log.error(f'gcid接口请求失败: {e}')
+    return []
+
+# ---------- 下载链接 ----------
 def get_play_url(song):
     mid = '239526275778893399526700786998289824956'
     userid = '0'
@@ -177,10 +268,10 @@ def download_file(url, path):
 def safe_name(s): return re.sub(r'[\\/*?:"<>|]', '_', str(s))
 
 # ---------- 同步 ----------
-def sync_playlist(pid, name, id_type):
+def sync_playlist(pid, name, id_type='numeric'):
     songs = get_songs(pid, id_type)
     if not songs:
-        log.error(f'歌单 {name} 无歌曲，跳过')
+        log.error(f'歌单 {name} 无歌曲')
         return
     folder = Path(DOWNLOAD_DIR) / safe_name(name)
     folder.mkdir(parents=True, exist_ok=True)
@@ -250,6 +341,25 @@ def api_del(pid):
     log.info(f'🗑️ 删除歌单：{pid}')
     return jsonify({'message': '删除成功'})
 
+@app.route('/api/import', methods=['POST'])
+def api_import():
+    data = request.get_json()
+    cookie = data.get('cookie', '').strip()
+    if not cookie: return jsonify({'error': '请输入Cookie'}), 400
+    imported = import_user_playlists(cookie)
+    if not imported:
+        return jsonify({'error': '导入失败，请查看日志排查（可能 Cookie 过期或缺少必要字段）'}), 500
+    pls = load_playlists()
+    existing_ids = {p['id'] for p in pls}
+    new_count = 0
+    for item in imported:
+        if item['id'] not in existing_ids:
+            pls.append({'id': item['id'], 'type': 'numeric', 'name': item['name']})
+            new_count += 1
+    save_playlists(pls)
+    log.info(f'🎉 导入完成，新增 {new_count} 个歌单')
+    return jsonify({'message': f'导入成功，新增 {new_count} 个歌单', 'playlists': pls})
+
 @app.route('/api/logs', methods=['GET'])
 def api_logs():
     try:
@@ -271,9 +381,12 @@ def api_sync():
             threading.Thread(target=sync_playlist, args=(p['id'], p.get('name',''), p.get('type','numeric')), daemon=True).start()
     return jsonify({'message': f'开始同步 {len(ids)} 个歌单'})
 
-# ---------- 启动 ----------
 if __name__ == '__main__':
-    log.info('🚀 服务启动')
-    threading.Thread(target=run_scheduler, daemon=True).start()
-    log.info(f'🌐 面板监听 0.0.0.0:{WEB_PORT}')
-    app.run(host='0.0.0.0', port=WEB_PORT, debug=False)
+    try:
+        log.info('🚀 服务启动')
+        threading.Thread(target=run_scheduler, daemon=True).start()
+        log.info(f'🌐 面板监听 0.0.0.0:{WEB_PORT}')
+        app.run(host='0.0.0.0', port=WEB_PORT, debug=False)
+    except Exception as e:
+        log.error(f'💥 启动失败: {traceback.format_exc()}')
+        while True: time.sleep(60)
