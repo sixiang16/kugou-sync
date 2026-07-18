@@ -14,26 +14,39 @@
 <div class="container-fluid">
     <h3 class="mb-4">🎵 酷狗歌单同步控制台</h3>
     <div class="row">
+        <!-- 左侧：管理区 -->
         <div class="col-md-4">
+            <div class="card mb-3">
+                <div class="card-header"><strong>导入歌单</strong></div>
+                <div class="card-body">
+                    <div class="input-group">
+                        <input type="text" class="form-control" id="cookie-input" placeholder="粘贴 Cookie（仅导入用）">
+                        <button class="btn btn-info" onclick="importPlaylists()">导入</button>
+                    </div>
+                    <small class="text-muted">只需导入一次，之后无需 Cookie</small>
+                </div>
+            </div>
             <div class="card">
-                <div class="card-header"><strong>我的歌单</strong></div>
+                <div class="card-header d-flex justify-content-between"><strong>我的歌单</strong><button class="btn btn-sm btn-outline-secondary" onclick="loadPlaylists()">刷新</button></div>
                 <div class="card-body p-2" style="max-height: 400px; overflow-y: auto;" id="playlist-list">
-                    <div class="text-muted text-center py-4">暂无歌单，请添加</div>
+                    <div class="text-muted text-center py-4">暂无歌单</div>
                 </div>
                 <div class="card-footer">
                     <div class="input-group mb-2">
-                        <input type="text" class="form-control" id="new-id" placeholder="歌单ID (如 6222311)">
-                        <input type="text" class="form-control" id="new-name" placeholder="歌单名称 (可选)">
+                        <input type="text" class="form-control" id="new-id" placeholder="歌单 ID">
+                        <input type="text" class="form-control" id="new-name" placeholder="名称（可选）">
                         <button class="btn btn-success" onclick="addPlaylist()">添加</button>
                     </div>
-                    <button class="btn btn-primary w-100" onclick="syncAll()">全量同步所有</button>
+                    <button class="btn btn-primary w-100" onclick="syncAll()">全量同步</button>
                     <button class="btn btn-outline-secondary w-100 mt-1" onclick="syncSelected()">同步选中</button>
                 </div>
             </div>
         </div>
+
+        <!-- 右侧：日志 -->
         <div class="col-md-8">
             <div class="card">
-                <div class="card-header d-flex justify-content-between align-items-center">
+                <div class="card-header d-flex justify-content-between">
                     <strong>实时日志</strong>
                     <button class="btn btn-sm btn-outline-secondary" onclick="clearLogs()">清空</button>
                 </div>
@@ -48,17 +61,18 @@
 </div>
 
 <script>
+    // ========== 歌单列表 ==========
     async function loadPlaylists() {
         const res = await fetch('/api/playlists');
         const data = await res.json();
         const listEl = document.getElementById('playlist-list');
         if (data.length === 0) {
-            listEl.innerHTML = '<div class="text-muted text-center py-4">暂无歌单，请添加</div>';
+            listEl.innerHTML = '<div class="text-muted text-center py-4">暂无歌单</div>';
             return;
         }
         listEl.innerHTML = data.map(p => `
             <div class="d-flex justify-content-between align-items-center border-bottom py-1">
-                <label class="ms-2"><input type="checkbox" value="${p.id}" class="me-2">${escapeHtml(p.name)} (${p.id})</label>
+                <label class="ms-2"><input type="checkbox" value="${p.id}" class="me-2">${escapeHtml(p.name)} <small class="text-muted">(${p.id})</small></label>
                 <button class="btn btn-sm btn-danger" onclick="deletePlaylist('${p.id}')">删除</button>
             </div>`).join('');
     }
@@ -87,18 +101,41 @@
     }
 
     async function deletePlaylist(id) {
-        if (!confirm('确认删除这个歌单吗？')) return;
+        if (!confirm('确认删除？')) return;
         await fetch(`/api/playlists/${id}`, {method: 'DELETE'});
         loadPlaylists();
     }
 
+    // ========== 导入 ==========
+    async function importPlaylists() {
+        const cookie = document.getElementById('cookie-input').value.trim();
+        if (!cookie) return alert('请粘贴 Cookie');
+        try {
+            const res = await fetch('/api/import', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({cookie})
+            });
+            const data = await res.json();
+            if (res.ok) {
+                alert(data.message);
+                loadPlaylists();
+            } else {
+                alert('导入失败: ' + data.error);
+            }
+        } catch (e) {
+            alert('网络错误');
+        }
+    }
+
+    // ========== 同步 ==========
     function getSelectedIds() {
         return Array.from(document.querySelectorAll('#playlist-list input:checked')).map(cb => cb.value);
     }
 
     async function syncSelected() {
         const ids = getSelectedIds();
-        if (ids.length === 0) return alert('请勾选要同步的歌单');
+        if (ids.length === 0) return alert('请勾选歌单');
         await fetch('/api/sync', {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -114,6 +151,7 @@
         });
     }
 
+    // ========== 日志 ==========
     let lastLogLength = 0;
     setInterval(async () => {
         const res = await fetch('/api/logs');
@@ -136,6 +174,7 @@
         lastLogLength = 0;
     }
 
+    // 初始化
     loadPlaylists();
 </script>
 </body>
