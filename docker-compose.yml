@@ -1,8 +1,7 @@
 version: '3.8'
 services:
   kugou-sync:
-    image: kugou-sync:latest          # 本地构建
-    build: .                          # 如果不想构建，可换成你的镜像地址
+    image: kugou-sync:latest          # 本地构建   
     container_name: kugou-sync
     restart: always
     environment:
